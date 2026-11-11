@@ -213,6 +213,7 @@ function renderConfirm() {
       ${riskScatter(ms)}
     </div>
   </div>
+  ${batchCard(ms)}
   <div class="card" style="padding-bottom:8px">
     <div class="ch" style="margin-bottom:12px"><div><div class="ct">Fix confirmation plans</div><div class="cs">For each bin: the posterior failure rate from the last ${d.config.W} nightlies, the risk left by one clean nightly, and the cheapest rerun plan at the fix revision.</div></div>
       <div class="toolbar"><button class="btn ghost" id="csv"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Export CSV</button></div></div>
@@ -229,7 +230,46 @@ function renderConfirm() {
   document.querySelectorAll('[data-f]').forEach((c) => { c.onclick = () => { state.filter = c.dataset.f; renderConfirm(); }; });
   const q = $('#q'); q.oninput = () => { state.q = q.value; drawConfirmTable(); };
   $('#csv').onclick = exportCsv;
+  $('#batchExport').onclick = exportBatch;
   drawConfirmTable();
+}
+
+const batchCache = new Map();
+function batch(ms) {
+  const key = `${state.settings.delta}|${state.settings.pi}`;
+  if (batchCache.has(key)) return batchCache.get(key);
+  const rows = ms.filter(([, m]) => m.verdict !== 'directed');
+  const bins = rows.map(([b, m]) => ({ id: b.id, target: m.target, items: m.items.map((it) => ({ ...it, id: `${b.ip}/${it.id}` })) }));
+  const bp = C.batchPlan(bins);
+  const separate = rows.reduce((s, [, m]) => s + m.plan.cost, 0);
+  const out = { bp, separate, n: rows.length, tests: Object.values(bp.plan).filter((x) => x > 0).length, seeds: Object.values(bp.plan).reduce((s, x) => s + x, 0) };
+  batchCache.set(key, out);
+  return out;
+}
+function batchCard(ms) {
+  const B = batch(ms), { bp } = B;
+  return `<div class="card">
+    <div class="ch"><div><div class="ct">One rerun batch for every pending fix</div><div class="cs">A fresh seed of a shared test (stress_all, rand_reset) is evidence for every bin that fires on it, so the batch is planned jointly: covering greedy, certified by a Lagrangian dual bound.</div></div>
+      <button class="btn" id="batchExport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Export batch</button></div>
+    <div class="big">
+      <div class="o">Batch<b>${hrs(bp.cost)} CPU-h</b></div>
+      <div>Planned bin by bin<b>${hrs(B.separate)} CPU-h</b></div>
+      <div>Saved<b>${pct(1 - bp.cost / B.separate, 0)}</b></div>
+      <div>Seeds · tests<b>${fmtInt(B.seeds)} · ${B.tests}</b></div>
+      <div>Proven within<b>${pct(bp.gap, 1)}</b></div>
+    </div>
+    <p class="note">${B.n} bins, every one at ≤ ${pct(state.settings.delta, 0)} residual risk if the batch comes back clean. Taking the per-test maximum of the single-bin plans gets most of the saving; the joint plan and its bound tell you how much is left.</p>
+  </div>`;
+}
+function exportBatch() {
+  const bins = state.data.regression.bins;
+  const ms = bins.map((b) => [b, model(b)]);
+  const { bp } = batch(ms);
+  const lines = [`# Fix-confirmation batch, nightly ${state.data.regression.day}, residual risk <= ${state.settings.delta}, fix prior ${state.settings.pi}`,
+    `# ${hrs(bp.cost)} CPU-h; witness seeds of each bin should be rerun first at the fix revision`];
+  for (const [k, n] of Object.entries(bp.plan).filter(([, n]) => n > 0).sort()) { const [ip, t] = k.split('/'); lines.push(`./util/dvsim/dvsim.py ${cfgPath(ip)} -i ${t} --reseed ${n}`); }
+  download(`fix-confirmation-batch-${state.data.regression.day}.sh`, lines.join('\n') + '\n', 'text/x-shellscript');
+  toast(`Exported batch: ${Object.values(bp.plan).filter((x) => x > 0).length} dvsim commands`);
 }
 
 function riskScatter(ms) {

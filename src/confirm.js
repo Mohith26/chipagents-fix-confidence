@@ -242,6 +242,101 @@ export function rerunNightly(items, nightlyRuns) {
   return { plan, cost, escape: escapeProb(items, plan) };
 }
 
+// ---------------------------------------------------------------- batch planning across bins
+//
+// Many bins fire on the same tests (stress_all, rand_reset), and one fresh seed of test t is
+// evidence for every pending fix whose bin fires on t. Batch problem:
+//   min sum_t c_t m_t   s.t.  for every bin j:  sum_{t in T_j} g_jt(m_t) <= log e_j
+// Each constraint is convex in m, so the relaxation is a convex program. We solve the integer
+// problem with a covering greedy (progress capped at each bin's remaining deficit) and certify
+// it with a Lagrangian dual bound maximised by projected subgradient ascent.
+
+/** bins: [{id, items:[{id: testKey, a, b, cost}], target}] (test keys shared across bins). */
+export function batchPlan(bins, opts = {}) {
+  const tests = new Map();
+  for (const bin of bins) for (const it of bin.items) {
+    if (!tests.has(it.id)) tests.set(it.id, { id: it.id, cost: it.cost, uses: [] });
+    tests.get(it.id).uses.push({ bin, it });
+  }
+  const m = Object.fromEntries([...tests.keys()].map((k) => [k, 0]));
+  const L = new Map(bins.map((b) => [b.id, 0]));
+  const goal = new Map(bins.map((b) => [b.id, Math.log(Math.max(b.target, 1e-300))]));
+  const gap = (b) => L.get(b.id) - goal.get(b.id); // > 0 while unsatisfied
+  const maxIter = opts.maxIter ?? 200000;
+  let iter = 0;
+  while (bins.some((b) => gap(b) > 1e-12) && iter++ < maxIter) {
+    let best = null, bestR = 0, bestStep = 1;
+    for (const t of tests.values()) {
+      const step = Math.max(1, Math.ceil(m[t.id] / 64)); // coarse steps on large plans
+      let progress = 0;
+      for (const { bin, it } of t.uses) {
+        const d = gap(bin);
+        if (d <= 1e-12) continue;
+        const drop = logEscapeTerm(it.a, it.b, m[t.id]) - logEscapeTerm(it.a, it.b, m[t.id] + step);
+        progress += Math.min(d, drop);
+      }
+      const r = progress / (t.cost * step);
+      if (r > bestR) { bestR = r; best = t; bestStep = step; }
+    }
+    if (!best) break;
+    for (const { bin, it } of best.uses) {
+      L.set(bin.id, L.get(bin.id) + logEscapeTerm(it.a, it.b, m[best.id] + bestStep) - logEscapeTerm(it.a, it.b, m[best.id]));
+    }
+    m[best.id] += bestStep;
+  }
+  // prune: drop seeds that are not needed (reverse pass, binary search per test)
+  for (const t of [...tests.values()].sort((x, y) => y.cost - x.cost)) {
+    let lo = 0, hi = m[t.id];
+    const ok = (k) => t.uses.every(({ bin, it }) => L.get(bin.id) - logEscapeTerm(it.a, it.b, m[t.id]) + logEscapeTerm(it.a, it.b, k) <= goal.get(bin.id) + 1e-12);
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (ok(mid)) hi = mid; else lo = mid + 1; }
+    if (lo < m[t.id]) {
+      for (const { bin, it } of t.uses) L.set(bin.id, L.get(bin.id) - logEscapeTerm(it.a, it.b, m[t.id]) + logEscapeTerm(it.a, it.b, lo));
+      m[t.id] = lo;
+    }
+  }
+  const cost = [...tests.values()].reduce((s, t) => s + t.cost * m[t.id], 0);
+  const feasible = bins.every((b) => gap(b) <= 1e-9);
+  const lowerBound = feasible ? batchLowerBound(bins, tests, goal, cost, opts.dualIters ?? 150) : 0;
+  return { plan: m, cost, feasible, lowerBound, gap: cost > 0 ? (cost - lowerBound) / cost : 0,
+    escapes: Object.fromEntries(bins.map((b) => [b.id, Math.exp(L.get(b.id))])) };
+}
+
+// max over lambda >= 0 of  sum_t min_m [c_t m + sum_j lambda_j g_jt(m)] - sum_j lambda_j log e_j
+function batchLowerBound(bins, tests, goal, ub, iters) {
+  const lam = new Map(bins.map((b) => [b.id, 0]));
+  // start each multiplier at the single-bin optimum's ratio scale
+  for (const b of bins) { const s = optimalPlan(b.items, b.target); lam.set(b.id, s.cost > 0 ? s.cost / Math.max(1e-9, -Math.log(b.target)) : 0); }
+  let best = 0;
+  for (let k = 0; k < iters; k++) {
+    let val = 0;
+    const mm = new Map();
+    for (const t of tests.values()) {
+      let x = 0, gx = 0, acc = 0; // greedy down the convex 1-D function
+      const g = (q) => t.uses.reduce((s, { bin, it }) => s + lam.get(bin.id) * logEscapeTerm(it.a, it.b, q), 0);
+      let step = 1;
+      for (;;) { // doubling then halving search on the marginal
+        const gn = g(x + step);
+        const inc = t.cost * step + gn - gx;
+        if (inc < 0) { acc += inc; x += step; gx = gn; step *= 2; if (x > 5e6) break; }
+        else if (step > 1) step = Math.max(1, step >> 2);
+        else break;
+      }
+      val += acc; mm.set(t.id, x);
+    }
+    for (const b of bins) val -= lam.get(b.id) * goal.get(b.id);
+    if (val > best) best = val;
+    // subgradient: constraint value at the inner minimiser
+    const step = 0.5 * (ub - val) / Math.max(1e-9, bins.reduce((s, b) => {
+      const sub = b.items.reduce((q, it) => q + logEscapeTerm(it.a, it.b, mm.get(it.id)), 0) - goal.get(b.id);
+      return s + sub * sub; }, 0));
+    for (const b of bins) {
+      const sub = b.items.reduce((q, it) => q + logEscapeTerm(it.a, it.b, mm.get(it.id)), 0) - goal.get(b.id);
+      lam.set(b.id, Math.max(0, lam.get(b.id) + step * sub));
+    }
+  }
+  return Math.min(best, ub);
+}
+
 // ---------------------------------------------------------------- signatures and bins
 
 const INFRA = /launch_task|Job killed most likely because|Failed to connect|envelope|chubby|returncode != |Job returned non-zero exit code|License|licen[cs]e checkout|No space left|ssh: /i;

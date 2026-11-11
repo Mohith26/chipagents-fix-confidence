@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as C from '../src/confirm.js';
-import { loadHistory, backtest, currentRegression, summarize, planFor, CONFIG } from '../scripts/build.mjs';
+import { loadHistory, backtest, currentRegression, summarize, planFor, batchFor, CONFIG } from '../scripts/build.mjs';
 
 const close = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} ${a} vs ${b}`);
 
@@ -113,6 +113,31 @@ test('simulation: clean plans meet the residual-risk target when p follows the p
   assert.ok(cleanBroken / clean >= delta - 0.02, 'not wildly conservative');
 });
 
+test('property: batch plans meet every bin, beat separate plans, and respect the dual bound', () => {
+  const r = C.rng(9);
+  for (let k = 0; k < 25; k++) {
+    const shared = randomItems(r, 2);
+    const bins = Array.from({ length: 3 }, (_, j) => ({ id: 'b' + j, target: [0.1, 0.05, 0.2][j],
+      items: shared.filter(() => r() < 0.8).concat(j === 2 ? [] : []).map((it) => ({ ...it, a: 1.5 + Math.floor(r() * 4) })) })).filter((b) => b.items.length);
+    if (!bins.length) continue;
+    const bp = C.batchPlan(bins);
+    assert.ok(bp.feasible);
+    for (const b of bins) assert.ok(C.escapeProb(b.items, bp.plan) <= b.target * (1 + 1e-9), 'bin meets target');
+    const separate = bins.reduce((s, b) => s + C.solvePlan(b.items, b.target).cost, 0);
+    assert.ok(bp.cost <= separate + 1e-9, 'shared seeds never cost more than separate plans');
+    // brute force over the shared tests (two tests, small ranges)
+    let opt = Infinity;
+    for (let x = 0; x <= 400; x++) for (let y = 0; y <= 400; y++) {
+      const plan = { [shared[0].id]: x, [shared[1].id]: y };
+      const c = x * shared[0].cost + y * shared[1].cost;
+      if (c >= opt) continue;
+      if (bins.every((b) => C.escapeProb(b.items, plan) <= b.target * (1 + 1e-12))) opt = c;
+    }
+    assert.ok(bp.lowerBound <= opt + 1e-6, `lower bound ${bp.lowerBound} <= optimum ${opt}`);
+    assert.ok(bp.cost <= opt * 1.15 + 3 * 9, `batch ${bp.cost} near optimum ${opt}`);
+  }
+});
+
 test('signatures: line-number churn collapses, wrappers are stripped, infra is dropped', () => {
   const a = C.normalizeSignature('UVM_ERROR (uart_scoreboard.sv:442) [scoreboard] Check failed item.d_data[i] == * Interrupt: TxEmpty');
   const b = C.normalizeSignature('Exit reason: Error: User command failed UVM_ERROR (uart_scoreboard.sv:450) [scoreboard] Check failed item.d_data[i] == * Interrupt: TxEmpty');
@@ -176,6 +201,9 @@ test('headline: committed results reproduce from the committed OpenTitan data', 
   assert.equal(sum.bins, results.current.bins);
   assert.equal(sum.unsafeAfterCleanNightly, results.current.unsafeAfterCleanNightly);
   assert.equal(sum.exactCount, sum.bins, 'every plan solved to optimality');
+  const batch = batchFor(cur, bt.model.W);
+  close(batch.cpuHours, results.batch.cpuHours, 1e-9, 'batch hours');
+  assert.ok(batch.feasible && batch.cpuHours < batch.separateHours && batch.lowerBoundHours <= batch.cpuHours);
 });
 
 test('app data matches results and every plan meets its target', () => {

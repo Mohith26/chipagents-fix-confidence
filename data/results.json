@@ -275,5 +275,16 @@
       "nightlyCpuHours": 659.5855833333335,
       "medianNightlyRisk": 0.24848817188687305
     }
+  },
+  "batch": {
+    "bins": 98,
+    "tests": 66,
+    "cpuHours": 1554.5908777777781,
+    "lowerBoundHours": 1406.1346998455497,
+    "gap": 0.09549533581751117,
+    "separateHours": 1829.89366944444,
+    "maxMergedHours": 1557.8866555555558,
+    "feasible": true,
+    "savedVsSeparate": 0.15044742558743562
   }
 }

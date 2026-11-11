@@ -16,6 +16,7 @@ ChipAgents' regression-triage flow ends with "fix → verification → final reg
 | Bins where one clean nightly is already enough | 59 (plans use 277 CPU-h vs 1,250 CPU-h for their nightly seeds, 78% less) |
 | Bins too rare to confirm by reruns (plan costs more than the whole IP regression) | 15 |
 | Plans solved to proven optimality (branch and bound) | 113 of 113 |
+| One joint rerun batch for the 98 rerun-confirmable bins (shared tests counted once) | 1,555 CPU-h vs 1,830 CPU-h planned bin by bin (15% less), within 9.5% of the Lagrangian lower bound |
 | Held-out (Jul to Oct 2024) signatures that vanished from a nightly and came back within 10 nightlies | **77%** (1,527 of 1,977) |
 | Comeback prediction on held-out nightlies: Brier / log loss / AUC | 0.171 / 0.517 / 0.680 (base rate: 0.180 / 0.547 / 0.50) |
 
@@ -27,7 +28,8 @@ ChipAgents' regression-triage flow ends with "fix → verification → final reg
 4. **Posterior.** Per test, the bug's per-seed failure rate gets a Beta(0.5 + fails, 0.5 + exposed − fails) posterior pooled over the last W nightlies (W = 16, chosen on the training split).
 5. **Escape probability.** If the fix does not work, a plan of m<sub>t</sub> fresh seeds stays clean with probability ∏<sub>t</sub> B(a<sub>t</sub>, b<sub>t</sub> + m<sub>t</sub>) / B(a<sub>t</sub>, b<sub>t</sub>). Bayes with the prior π that the fix works (default 56.3%, ChipAgents RCA's published top-1 accuracy; set it from the RCA confidence score) gives the residual risk after a clean plan.
 6. **Optimal plan.** Minimise Σ m<sub>t</sub> · runtime<sub>t</sub> subject to residual risk ≤ δ. Each log-escape term is a cumulant generating function in m, hence convex, so a greedy on (log-escape drop / CPU cost) traces the exact cost-risk frontier: every greedy prefix is optimal for the risk it reaches. A Lagrangian dual bound certifies the gap at the requested target and a branch and bound closes it (all 113 plans exact).
-7. **Backtest.** For every time a signature fired at nightly r and was absent at r+1 although its tests ran, predict whether it returns within 10 nightlies: P(unfixed | clean) × P(fires again | unfixed), plus a re-emergence rate ρ for signatures that come back from a later change. W, π and ρ are fitted on nightlies before 2024-07-01 and scored on the rest.
+7. **Batch.** Many bins fire on the same stress tests, and one fresh seed is evidence for all of them. The joint problem (min Σ c<sub>t</sub> m<sub>t</sub> subject to every bin's log-escape constraint) is convex in the relaxation; a covering greedy with deficit-capped progress plus a pruning pass solves it, and projected subgradient ascent on the Lagrangian dual certifies the gap. Honest note: taking each test's maximum over the single-bin plans already gets almost all of the 15% (1,558 CPU-h); the joint solver mainly adds the certificate.
+8. **Backtest.** For every time a signature fired at nightly r and was absent at r+1 although its tests ran, predict whether it returns within 10 nightlies: P(unfixed | clean) × P(fires again | unfixed), plus a re-emergence rate ρ for signatures that come back from a later change. W, π and ρ are fitted on nightlies before 2024-07-01 and scored on the rest.
 
 The app (`index.html`, `app.js`, `styles.css`) is static, loads `data/app.json` (184 KB) and computes every number in the browser with `src/confirm.js`, the same module the tests and build script use.
 
@@ -44,11 +46,11 @@ The app (`index.html`, `app.js`, `styles.css`) is static, loads `data/app.json` 
 ```
 python3 scripts/list_nightlies.py && python3 scripts/fetch_opentitan.py   # optional: refresh data (about 1 minute)
 node scripts/build.mjs                                                     # data/app.json + data/results.json
-node --test test/*.test.mjs                                                # 14 tests
+node --test test/*.test.mjs                                                # 15 tests
 python3 -m http.server   # then open http://localhost:8000
 ```
 
-Tests cover lgamma and Beta quantiles against closed forms, the escape term against numerical integration, convexity on random posteriors (property test), greedy-prefix optimality and exact optimality against brute force on random instances, a 20,000-draw simulation showing clean plans meet the residual-risk target, signature normalisation and censoring, and a headline test that rebuilds `results.json` from the committed data.
+Tests cover lgamma and Beta quantiles against closed forms, the escape term against numerical integration, convexity on random posteriors (property test), greedy-prefix optimality and exact optimality against brute force on random instances, batch feasibility and dual-bound validity against brute force, a 20,000-draw simulation showing clean plans meet the residual-risk target, signature normalisation and censoring, and a headline test that rebuilds `results.json` from the committed data.
 
 ## Honest limitations
 

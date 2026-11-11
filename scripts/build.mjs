@@ -198,6 +198,20 @@ export function summarize(cur, W, cfg = CONFIG) {
       medianNightlyRisk: median(by('targeted').map((r) => r.p.nightlyRisk)) },
   };
 }
+/** One rerun batch for every bin that can be confirmed by reruns (shared tests counted once). */
+export function batchFor(cur, W, cfg = CONFIG) {
+  const rows = cur.bins.map((b) => ({ b, p: planFor(b, W, cfg.delta, cfg.rcaPrior) })).filter((r) => r.p.opt.feasible && r.p.opt.cost <= r.b.ipCpu);
+  const bins = rows.map((r) => ({ id: r.b.id, target: r.p.target, items: r.p.items.map((it) => ({ ...it, id: `${r.b.ip}/${it.id}` })) }));
+  const bp = C.batchPlan(bins);
+  const separate = rows.reduce((s, r) => s + r.p.opt.cost, 0);
+  const merged = {}, cost = {};
+  for (const r of rows) for (const it of r.p.items) { const k = `${r.b.ip}/${it.id}`; merged[k] = Math.max(merged[k] || 0, r.p.opt.plan[it.id] || 0); cost[k] = it.cost; }
+  const mergedCost = Object.entries(merged).reduce((s, [k, v]) => s + v * cost[k], 0);
+  return { bins: rows.length, tests: Object.keys(bp.plan).length, cpuHours: bp.cost / 3600, lowerBoundHours: bp.lowerBound / 3600, gap: bp.gap,
+    separateHours: separate / 3600, maxMergedHours: mergedCost / 3600, feasible: bp.feasible,
+    savedVsSeparate: 1 - bp.cost / separate };
+}
+
 function median(xs) { const s = [...xs].sort((a, b) => a - b); const n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
@@ -210,7 +224,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const app = { source: 'reports.opentitan.org nightly DV reports (lowRISC, Apache-2.0)', config: { ...CONFIG, W: bt.model.W, fittedPi: bt.model.pi },
     regression: cur, backtest: { ...bt, sample: bt.sample } };
   fs.writeFileSync(path.join(ROOT, 'data/app.json'), JSON.stringify(app));
-  const results = { generated: 'node scripts/build.mjs', config: app.config, backtest: { ...bt, sample: undefined }, current: { day: cur.day, ...sum } };
+  const results = { generated: 'node scripts/build.mjs', config: app.config, backtest: { ...bt, sample: undefined }, current: { day: cur.day, ...sum }, batch: batchFor(cur, bt.model.W) };
   fs.writeFileSync(path.join(ROOT, 'data/results.json'), JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results, null, 2));
   console.log('built in', Date.now() - t0, 'ms; app.json', fs.statSync(path.join(ROOT, 'data/app.json')).size, 'bytes');
