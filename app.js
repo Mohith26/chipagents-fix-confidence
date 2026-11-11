@@ -269,7 +269,7 @@ function drawConfirmTable() {
   const th = (k, l, cls = '') => `<th class="s ${cls}" data-k="${k}" aria-sort="${key === k ? (dir > 0 ? 'ascending' : 'descending') : 'none'}">${l} ${key === k ? `<span class="arr">${dir > 0 ? '↑' : '↓'}</span>` : ''}</th>`;
   const d = state.settings.delta;
   if (!rows.length) { $('#tbl').innerHTML = `<div class="empty"><b>No bins match</b>Try another filter or clear the search.</div>`; return; }
-  $('#tbl').innerHTML = `<div class="tblwrap"><table class="tbl fixed"><colgroup><col style="width:auto"><col style="width:92px"><col style="width:84px"><col style="width:226px"><col style="width:96px"><col style="width:168px"><col style="width:112px"></colgroup><thead><tr>
+  $('#tbl').innerHTML = `<div class="tblwrap"><table class="tbl fixed"><colgroup><col style="width:auto"><col style="width:92px"><col style="width:84px"><col style="width:226px"><col style="width:112px"><col style="width:168px"><col style="width:112px"></colgroup><thead><tr>
     ${th('ip', 'Failure bin')}${th('fails', 'Failing', 'num')}${th('rate', 'Rate/seed', 'num')}<th>Last 30 nightlies</th>${th('risk', 'Clean-nightly risk', 'num wrap')}${th('cpu', 'Confirmation plan')}<th>Status</th></tr></thead>
     <tbody>${rows.map((b, i) => { const m = model(b); const lo = C.betaQuantile(0.05, m.items[0].a, m.items[0].b), hi = C.betaQuantile(0.95, m.items[0].a, m.items[0].b);
       return `<tr class="rowlink ${i === state.sel ? 'sel' : ''}" data-href="#/bin/${encodeURIComponent(b.id)}" tabindex="0">
